@@ -2,6 +2,7 @@ from ..exchanges.binance_client import BinanceClient
 from ..exchanges.okx_client import OKXClient
 from ..config import Config
 from ..dingtalk_notifier import DingTalkNotifier
+from ..trading_time import trading_time_manager, is_trading_time, wait_until_trading_time
 import time
 import json
 import os
@@ -656,13 +657,50 @@ class ArbitrageManager:
         elif self.mt5:
             logger.info(f"💰 策略: Binance{Config.PAXG_QUANTITY}盎司PAXG ⇄ MT5(1手XAUUSD=100盎司)")
         logger.info(f"📊 阈值: 开仓±{Config.MIN_PRICE_DIFF:.2f} | 平仓±{Config.CLOSE_PRICE_DIFF:.2f} | 间隔{Config.PRICE_CHECK_INTERVAL}s")
+        logger.info(f"⏰ 交易时间校验: {'✅ 启用' if Config.ENABLE_TRADING_TIME_CHECK else '❌ 禁用'}")
         logger.info("=" * 60)
+        
+        # 显示交易时间信息（如果启用了交易时间校验）
+        if Config.ENABLE_TRADING_TIME_CHECK:
+            logger.info("\n🕐 交易时间信息:")
+            logger.info(trading_time_manager.get_trading_schedule_info())
+            
+            # 检查当前是否在交易时间
+            is_trading, trading_status = is_trading_time()
+            if not is_trading:
+                logger.info(f"⏰ 当前不在交易时间: {trading_status}")
+                logger.info("⏳ 等待交易时间开始...")
+                try:
+                    wait_until_trading_time(60)  # 每60秒检查一次
+                    logger.info("✅ 交易时间开始，开始监控价格")
+                except KeyboardInterrupt:
+                    logger.info("⌨️ 用户中断等待，系统退出")
+                    return
+        else:
+            logger.info("\n⏰ 交易时间校验已禁用，将24小时运行")
+            logger.info("⚠️ 注意：在非交易时间进行交易可能导致失败或异常")
         
         consecutive_errors = 0
         max_consecutive_errors = 5
         
         while not self._shutdown_called:
             try:
+                # 检查是否仍在交易时间（如果启用了交易时间校验）
+                if Config.ENABLE_TRADING_TIME_CHECK:
+                    is_trading, trading_status = is_trading_time()
+                    if not is_trading:
+                        logger.info(f"\n⏰ 进入休市时间: {trading_status}")
+                        logger.info("⏳ 等待下次交易时间...")
+                        try:
+                            wait_until_trading_time(60)  # 每60秒检查一次
+                            logger.info("✅ 交易时间恢复，继续监控价格")
+                            # 重置错误计数
+                            consecutive_errors = 0
+                            continue
+                        except KeyboardInterrupt:
+                            logger.info("⌨️ 用户中断等待，系统退出")
+                            break
+                
                 paxg_price, xauusd_price = self.get_prices()
                 if paxg_price is None or xauusd_price is None:
                     consecutive_errors += 1

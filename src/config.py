@@ -41,6 +41,9 @@ class Config:
     # 时间间隔
     PRICE_CHECK_INTERVAL = int(os.getenv('PRICE_CHECK_INTERVAL', 10)) 
 
+    # 交易时间校验配置
+    ENABLE_TRADING_TIME_CHECK = os.getenv('ENABLE_TRADING_TIME_CHECK', 'true').lower() == 'true'  # 是否启用交易时间校验
+
     # 交易配置  
     MIN_PRICE_DIFF = float(os.getenv('MIN_PRICE_DIFF', 6))  # 开仓阈值
     CLOSE_PRICE_DIFF = float(os.getenv('CLOSE_PRICE_DIFF', 2))  # 平仓阈值
