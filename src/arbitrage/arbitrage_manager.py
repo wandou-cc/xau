@@ -112,6 +112,9 @@ class ArbitrageManager:
             self.total_trades_count = 0
             self.total_system_profit = 0.0
             
+            # 交易时间状态跟踪
+            self.last_trading_status = None
+            
             # 发送启动通知
             if self.dingtalk_notifier:
                 try:
@@ -665,20 +668,25 @@ class ArbitrageManager:
             logger.info("\n🕐 交易时间信息:")
             logger.info(trading_time_manager.get_trading_schedule_info())
             
-            # 检查当前是否在交易时间
+            # 检查当前是否在交易时间并初始化状态
             is_trading, trading_status = is_trading_time()
+            self.last_trading_status = is_trading  # 初始化交易状态
             if not is_trading:
                 logger.info(f"⏰ 当前不在交易时间: {trading_status}")
                 logger.info("⏳ 等待交易时间开始...")
                 try:
                     wait_until_trading_time(60)  # 每60秒检查一次
                     logger.info("✅ 交易时间开始，开始监控价格")
+                    # 更新状态并发送开盘通知
+                    self._check_and_notify_trading_status_change()
                 except KeyboardInterrupt:
                     logger.info("⌨️ 用户中断等待，系统退出")
                     return
         else:
             logger.info("\n⏰ 交易时间校验已禁用，将24小时运行")
             logger.info("⚠️ 注意：在非交易时间进行交易可能导致失败或异常")
+            # 即使禁用了交易时间校验，也初始化状态为True
+            self.last_trading_status = True
         
         consecutive_errors = 0
         max_consecutive_errors = 5
@@ -687,7 +695,7 @@ class ArbitrageManager:
             try:
                 # 检查是否仍在交易时间（如果启用了交易时间校验）
                 if Config.ENABLE_TRADING_TIME_CHECK:
-                    is_trading, trading_status = is_trading_time()
+                    is_trading, trading_status = self._check_and_notify_trading_status_change()
                     if not is_trading:
                         logger.info(f"\n⏰ 进入休市时间: {trading_status}")
                         logger.info("⏳ 等待下次交易时间...")
@@ -785,6 +793,36 @@ class ArbitrageManager:
                     self.shutdown_system(f"系统错误: {str(e)[:100]}", True)
                     break
                 time.sleep(Config.PRICE_CHECK_INTERVAL)
+    
+    def _check_and_notify_trading_status_change(self) -> Tuple[bool, str]:
+        """检查交易状态变化并发送钉钉通知"""
+        is_trading, trading_status = is_trading_time()
+        
+        # 如果状态发生变化，发送通知
+        if self.last_trading_status is not None and self.last_trading_status != is_trading:
+            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            if is_trading:
+                # 开盘通知
+                title = "🔔 交易开盘通知"
+                content = f"时间: {current_time}\n状态: {trading_status}\n系统已恢复价格监控"
+                logger.info(f"📈 开盘通知: {trading_status}")
+            else:
+                # 闭市通知
+                title = "🔕 交易闭市通知"
+                content = f"时间: {current_time}\n状态: {trading_status}\n系统暂停交易，等待下次开盘"
+                logger.info(f"📉 闭市通知: {trading_status}")
+            
+            # 发送钉钉通知
+            if self.dingtalk_notifier:
+                try:
+                    self.dingtalk_notifier.send_simple_message_to_all(title, content)
+                except Exception as e:
+                    logger.warning(f"⚠️ 发送交易状态通知失败: {e}")
+        
+        # 更新状态
+        self.last_trading_status = is_trading
+        return is_trading, trading_status
     
     def _display_positions_info(self, binance_positions: List[Dict[str, Any]], 
                                xau_positions: List[Any], xau_exchange_name: str, diff: float) -> None:
