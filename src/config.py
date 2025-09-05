@@ -67,14 +67,14 @@ class Config:
     # 支持多个钉钉群组配置
     DINGTALK_GROUP1_WEBHOOK = os.getenv('DINGTALK_GROUP1_WEBHOOK')
     DINGTALK_GROUP1_NAME = os.getenv('DINGTALK_GROUP1_NAME', '套利交易群1')
-    # DINGTALK_GROUP2_WEBHOOK = os.getenv('DINGTALK_GROUP2_WEBHOOK')
-    # DINGTALK_GROUP2_NAME = os.getenv('DINGTALK_GROUP2_NAME', '套利交易群2')
-    # DINGTALK_GROUP3_WEBHOOK = os.getenv('DINGTALK_GROUP3_WEBHOOK')
-    # DINGTALK_GROUP3_NAME = os.getenv('DINGTALK_GROUP3_NAME', '套利交易群3')
-    # DINGTALK_GROUP4_WEBHOOK = os.getenv('DINGTALK_GROUP4_WEBHOOK')
-    # DINGTALK_GROUP4_NAME = os.getenv('DINGTALK_GROUP4_NAME', '套利交易群4')
-    # DINGTALK_GROUP5_WEBHOOK = os.getenv('DINGTALK_GROUP5_WEBHOOK')
-    # DINGTALK_GROUP5_NAME = os.getenv('DINGTALK_GROUP5_NAME', '套利交易群5')
+
+    # 定时推送持仓信息配置
+    ENABLE_POSITION_NOTIFICATION = os.getenv('ENABLE_POSITION_NOTIFICATION', 'true').lower() == 'true'
+    # 推送时间配置数组（24小时制，格式：HH:MM）
+    POSITION_NOTIFICATION_TIMES = [
+        time.strip() for time in os.getenv('POSITION_NOTIFICATION_TIMES', '09:00,12:00,15:00,18:00,21:00').split(',')
+        if time.strip()
+    ]
 
 
  

@@ -441,6 +441,19 @@ class DingTalkNotifier:
             logger.error(f"向群组 {group['name']} 发送关闭通知失败: {str(e)}")
             return False
     
+    def _send_position_to_group(self, position_data: Dict[str, Any], group: Dict[str, str]) -> bool:
+        """向指定群组发送持仓信息通知"""
+        try:
+            if not self.config.get('enabled', True):
+                return False
+            
+            message = self._build_position_message(position_data)
+            return self._send_message(group['webhook'], message, group['name'])
+                
+        except Exception as e:
+            logger.error(f"向群组 {group['name']} 发送持仓信息通知失败: {str(e)}")
+            return False
+    
     def _build_system_startup_message(self) -> Dict[str, Any]:
         """构建系统启动消息"""
         startup_time = datetime.now()
@@ -526,6 +539,112 @@ class DingTalkNotifier:
             }
         }
     
+    def _build_position_message(self, position_data: Dict[str, Any]) -> Dict[str, Any]:
+        """构建持仓信息消息"""
+        timestamp = position_data.get('timestamp', datetime.now())
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        
+        binance_positions = position_data.get('binance_positions', [])
+        xau_positions = position_data.get('xau_positions', [])
+        xau_exchange_name = position_data.get('xau_exchange_name', 'OKX')
+        current_diff = position_data.get('current_diff', 0)
+        paxg_price = position_data.get('paxg_price', 0)
+        xauusd_price = position_data.get('xauusd_price', 0)
+        total_pnl = position_data.get('total_pnl', 0)
+        binance_pnl = position_data.get('binance_pnl', 0)
+        xau_pnl = position_data.get('xau_pnl', 0)
+        
+        # 状态emoji
+        if binance_positions or xau_positions:
+            status_emoji = "📊"
+            position_status = "有持仓"
+        else:
+            status_emoji = "💤"
+            position_status = "无持仓"
+        
+        content = f"""
+## {status_emoji} 持仓状态报告
+
+### ⏰ 基本信息
+- **时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}
+- **状态**: {position_status}
+- **当前价差**: {current_diff:+.2f} USDT
+
+### 💹 价格信息
+- **PAXG价格**: ${paxg_price:.2f}
+- **XAUUSD价格**: ${xauusd_price:.2f}
+
+### 📊 持仓详情"""
+        
+        # Binance持仓信息
+        if binance_positions:
+            content += f"\n**🏢 Binance PAXG持仓:**\n"
+            for i, pos in enumerate(binance_positions, 1):
+                try:
+                    symbol = pos.get('symbol', 'N/A')
+                    side = pos.get('positionSide', 'N/A')
+                    size = float(pos.get('positionAmt', 0))
+                    entry_price = float(pos.get('entryPrice', 0))
+                    mark_price = float(pos.get('markPrice', 0))
+                    unrealized_pnl = float(pos.get('unRealizedProfit', 0))
+                    
+                    content += f"- [{i}] {symbol} {side}: {abs(size):.4f} | 开仓: ${entry_price:.2f} | 标记: ${mark_price:.2f} | 盈亏: {unrealized_pnl:+.2f}\n"
+                except (ValueError, TypeError):
+                    content += f"- [{i}] 解析持仓数据失败\n"
+        else:
+            content += f"\n**🏢 Binance PAXG持仓:** 无\n"
+        
+        # XAUUSD持仓信息
+        if xau_positions:
+            content += f"\n**🏢 {xau_exchange_name} XAUUSD持仓:**\n"
+            for i, pos in enumerate(xau_positions, 1):
+                try:
+                    if xau_exchange_name == "OKX":
+                        inst_id = pos.get('instId', 'N/A')
+                        side = pos.get('posSide', 'N/A')
+                        size = float(pos.get('pos', 0))
+                        avg_px = float(pos.get('avgPx', 0))
+                        mark_px = float(pos.get('markPx', 0))
+                        upl = float(pos.get('upl', 0))
+                        
+                        size_oz = abs(size) / 1000
+                        content += f"- [{i}] {inst_id} {side}: {abs(size):.0f}张({size_oz:.3f}盎司) | 开仓: ${avg_px:.2f} | 标记: ${mark_px:.2f} | 盈亏: {upl:+.2f}\n"
+                    else:  # MT5
+                        symbol = getattr(pos, 'symbol', 'N/A')
+                        type_str = "LONG" if getattr(pos, 'type', 0) == 0 else "SHORT"
+                        volume = getattr(pos, 'volume', 0)
+                        price_open = getattr(pos, 'price_open', 0)
+                        price_current = getattr(pos, 'price_current', 0)
+                        profit = getattr(pos, 'profit', 0)
+                        
+                        volume_oz = volume * 100
+                        content += f"- [{i}] {symbol} {type_str}: {volume}手({volume_oz}盎司) | 开仓: ${price_open:.2f} | 当前: ${price_current:.2f} | 盈亏: {profit:+.2f}\n"
+                except (ValueError, TypeError, AttributeError):
+                    content += f"- [{i}] 解析{xau_exchange_name}持仓数据失败\n"
+        else:
+            content += f"\n**🏢 {xau_exchange_name} XAUUSD持仓:** 无\n"
+        
+        # 总盈亏
+        content += f"""
+### 💰 盈亏汇总
+- **Binance盈亏**: {binance_pnl:+.2f} USDT
+- **{xau_exchange_name}盈亏**: {xau_pnl:+.2f} USDT
+- **总盈亏**: {total_pnl:+.2f} USDT
+
+### 📈 状态分析
+- **盈亏状态**: {'🟢 盈利' if total_pnl > 0 else '🔴 亏损' if total_pnl < 0 else '⚪ 平衡'}
+- **价差状态**: {'⬆️ PAXG高' if current_diff > 0 else '⬇️ PAXG低' if current_diff < 0 else '⚖️ 平衡'}
+        """.strip()
+        
+        return {
+            "msgtype": "markdown",
+            "markdown": {
+                "title": f"{status_emoji} 持仓状态报告",
+                "text": content
+            }
+        }
+    
     def send_simple_message_to_all(self, title: str, content: str) -> Dict[str, bool]:
         """
         向所有群组发送简单消息
@@ -542,6 +661,38 @@ class DingTalkNotifier:
         for group in self.users:
             if group.get('enabled', True):
                 success = self.send_simple_message_to_group(title, content, group)
+                results[group['name']] = success
+            else:
+                results[group['name']] = False
+                logger.debug(f"群组 {group['name']} 已禁用，跳过通知")
+        
+        return results
+    
+    def send_position_notification(self, position_data: Dict[str, Any]) -> Dict[str, bool]:
+        """
+        发送持仓信息通知
+        
+        Args:
+            position_data: 持仓数据字典，包含以下字段：
+                - binance_positions: Binance持仓列表
+                - xau_positions: XAUUSD持仓列表
+                - xau_exchange_name: XAUUSD交易所名称
+                - current_diff: 当前价差
+                - paxg_price: PAXG价格
+                - xauusd_price: XAUUSD价格
+                - total_pnl: 总盈亏
+                - binance_pnl: Binance盈亏
+                - xau_pnl: XAUUSD交易所盈亏
+                - timestamp: 时间戳
+                
+        Returns:
+            每个群组的发送结果字典
+        """
+        results = {}
+        
+        for group in self.users:
+            if group.get('enabled', True):
+                success = self._send_position_to_group(position_data, group)
                 results[group['name']] = success
             else:
                 results[group['name']] = False

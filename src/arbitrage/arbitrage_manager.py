@@ -115,6 +115,11 @@ class ArbitrageManager:
             # 交易时间状态跟踪
             self.last_trading_status = None
             
+            # 定时推送管理
+            self.position_notification_enabled = Config.ENABLE_POSITION_NOTIFICATION
+            self.position_notification_times = Config.POSITION_NOTIFICATION_TIMES
+            self.last_notification_date = None  # 跟踪最后一次推送的日期，防止重复推送
+            
             # 发送启动通知
             if self.dingtalk_notifier:
                 try:
@@ -628,16 +633,18 @@ class ArbitrageManager:
             logger.error(f"❌ 平仓失败: {e}")
             return False
 
-    def should_close_position(self, diff: float) -> bool:
-        """判断是否应该平仓（基于实际持仓，不依赖内部状态）"""
-        # 检查是否有实际持仓
-        binance_positions = self.binance.get_open_positions()
-        if self.okx:
-            xau_positions = self.okx.get_open_positions()
-        elif self.mt5:
-            xau_positions = self.mt5.get_open_positions()
-        else:
-            xau_positions = []
+    def should_close_position(self, diff: float, binance_positions: List[Dict[str, Any]] = None, 
+                              xau_positions: List[Any] = None) -> bool:
+        """判断是否应该平仓（基于已获取的持仓信息）"""
+        # 如果没有传入持仓信息，则获取（向后兼容）
+        if binance_positions is None or xau_positions is None:
+            binance_positions = self.binance.get_open_positions()
+            if self.okx:
+                xau_positions = self.okx.get_open_positions()
+            elif self.mt5:
+                xau_positions = self.mt5.get_open_positions()
+            else:
+                xau_positions = []
         
         has_positions = (binance_positions and len(binance_positions) > 0) or (xau_positions and len(xau_positions) > 0)
         
@@ -661,6 +668,14 @@ class ArbitrageManager:
             logger.info(f"💰 策略: Binance{Config.PAXG_QUANTITY}盎司PAXG ⇄ MT5(1手XAUUSD=100盎司)")
         logger.info(f"📊 阈值: 开仓±{Config.MIN_PRICE_DIFF:.2f} | 平仓±{Config.CLOSE_PRICE_DIFF:.2f} | 间隔{Config.PRICE_CHECK_INTERVAL}s")
         logger.info(f"⏰ 交易时间校验: {'✅ 启用' if Config.ENABLE_TRADING_TIME_CHECK else '❌ 禁用'}")
+        
+        # 显示定时推送配置
+        if self.position_notification_enabled and self.position_notification_times:
+            times_str = ', '.join(self.position_notification_times)
+            logger.info(f"📱 定时推送: ✅ 启用 ({times_str})")
+        else:
+            logger.info(f"📱 定时推送: ❌ 禁用")
+        
         logger.info("=" * 60)
         
         # 显示交易时间信息（如果启用了交易时间校验）
@@ -729,6 +744,9 @@ class ArbitrageManager:
                 # 更新价差统计（跟随循环执行）
                 self.update_diff_stats(diff, paxg_price, xauusd_price)
                 
+                # 检查定时推送
+                self._check_and_send_scheduled_notification(paxg_price, xauusd_price, diff)
+                
                 # 简化的价格显示
                 print(f"\r[{current_time}] PAXG: ${paxg_price:.2f} | XAUUSD: ${xauusd_price:.2f} | 价差: {diff:+.2f} | 范围: [{self.min_diff:.2f}, {self.max_diff:.2f}]", end="")
                 
@@ -750,9 +768,9 @@ class ArbitrageManager:
                 if xau_positions or binance_positions:
                     self._display_positions_info(binance_positions, xau_positions, xau_exchange_name, diff)
                     
-                    # 检查是否要平仓（基于实际持仓）
-                    should_close = self.should_close_position(diff)
-                    logger.info(f'是否应该平仓: {should_close} (基于实际持仓判断)')
+                    # 检查是否要平仓（使用已获取的持仓信息，避免重复调用API）
+                    should_close = self.should_close_position(diff, binance_positions, xau_positions)
+                    logger.info(f'是否应该平仓: {should_close} (基于已获取持仓判断)')
                     
                     if should_close:
                         logger.info("🔄 开始执行平仓...")
@@ -845,9 +863,8 @@ class ArbitrageManager:
                     entry_price = float(pos.get('entryPrice', 0))
                     mark_price = float(pos.get('markPrice', 0))
                     unrealized_pnl = float(pos.get('unRealizedProfit', 0))
-                    roe = float(pos.get('percentage', 0))
-                    
-                    logger.info(f"   [{i}] {symbol} {side}: {abs(size):.4f} | 开仓价: ${entry_price:.2f} | 标记价: ${mark_price:.2f} | 盈亏: {unrealized_pnl:+.2f} | ROE: {roe:+.2f}%")
+                    liquidation_price = float(pos.get('liquidationPrice', 0))
+                    logger.info(f"   [{i}] {symbol} {side}: {abs(size):.4f} | 开仓价: ${entry_price:.2f} | 标记价: ${mark_price:.2f} | 盈亏: {unrealized_pnl:+.2f} | 强平价格: ${liquidation_price:.2f}")
                     binance_pnl += unrealized_pnl
                 except (ValueError, TypeError) as e:
                     logger.warning(f"   [{i}] 解析Binance持仓数据失败: {e}")
@@ -882,10 +899,11 @@ class ArbitrageManager:
                         price_open = getattr(pos, 'price_open', 0)
                         price_current = getattr(pos, 'price_current', 0)
                         profit = getattr(pos, 'profit', 0)
+                        swap_fee = getattr(pos, 'swap', 0)
                         
                         # MT5的volume是手数，1手=100盎司
                         volume_oz = volume * 100
-                        logger.info(f"   [{i}] {symbol} {type_str}: {volume}手({volume_oz}盎司) | 开仓价: ${price_open:.2f} | 当前价: ${price_current:.2f} | 盈亏: {profit:+.2f}")
+                        logger.info(f"   [{i}] {symbol} {type_str}: {volume}手({volume_oz}盎司) | 开仓价: ${price_open:.2f} | 当前价: ${price_current:.2f} | 盈亏: {profit:+.2f} | 隔夜费: {swap_fee:+.2f}")
                         xau_pnl += profit
                 except (ValueError, TypeError, AttributeError) as e:
                     logger.warning(f"   [{i}] 解析{xau_exchange_name}持仓数据失败: {e}")
@@ -899,3 +917,111 @@ class ArbitrageManager:
         logger.info(f"💰 总盈亏: {total_pnl:+.2f} USDT (Binance: {binance_pnl:+.2f} | {xau_exchange_name}: {xau_pnl:+.2f})")
         close_condition_met = abs(diff) <= Config.CLOSE_PRICE_DIFF
         logger.info(f'平仓条件: |{diff:.2f}| <= {Config.CLOSE_PRICE_DIFF} → {"✅满足" if close_condition_met else "❌不满足"}')
+    
+    @safe_execute("发送定时持仓通知")
+    def _send_scheduled_position_notification(self, paxg_price: float, xauusd_price: float, diff: float) -> None:
+        """发送定时持仓通知到钉钉群"""
+        try:
+            if not self.position_notification_enabled or not self.dingtalk_notifier:
+                return
+            
+            # 获取当前持仓信息
+            binance_positions = self.binance.get_open_positions()
+            
+            # 根据初始化的客户端获取黄金持仓
+            if self.okx:
+                xau_positions = self.okx.get_open_positions()
+                xau_exchange_name = "OKX"
+            elif self.mt5:
+                xau_positions = self.mt5.get_open_positions()
+                xau_exchange_name = "MT5"
+            else:
+                xau_positions = []
+                xau_exchange_name = "未知"
+            
+            # 计算盈亏
+            binance_pnl = 0
+            xau_pnl = 0
+            
+            # 计算Binance盈亏
+            if binance_positions:
+                for pos in binance_positions:
+                    try:
+                        unrealized_pnl = float(pos.get('unRealizedProfit', 0))
+                        binance_pnl += unrealized_pnl
+                    except (ValueError, TypeError):
+                        pass
+            
+            # 计算XAUUSD交易所盈亏
+            if xau_positions:
+                for pos in xau_positions:
+                    try:
+                        if self.okx:
+                            upl = float(pos.get('upl', 0))
+                            xau_pnl += upl
+                        elif self.mt5:
+                            profit = getattr(pos, 'profit', 0)
+                            xau_pnl += profit
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+            
+            total_pnl = binance_pnl + xau_pnl
+            
+            # 构建持仓数据
+            position_data = {
+                'binance_positions': binance_positions,
+                'xau_positions': xau_positions,
+                'xau_exchange_name': xau_exchange_name,
+                'current_diff': diff,
+                'paxg_price': paxg_price,
+                'xauusd_price': xauusd_price,
+                'total_pnl': total_pnl,
+                'binance_pnl': binance_pnl,
+                'xau_pnl': xau_pnl,
+                'timestamp': datetime.now()
+            }
+            
+            # 发送通知
+            results = self.dingtalk_notifier.send_position_notification(position_data)
+            
+            success_count = sum(1 for result in results.values() if result)
+            total_count = len(results)
+            
+            logger.info(f"📱 定时持仓通知已发送: {success_count}/{total_count} 群组成功")
+            
+        except Exception as e:
+            logger.error(f"❌ 发送定时持仓通知失败: {e}")
+    
+    def _check_and_send_scheduled_notification(self, paxg_price: float, xauusd_price: float, diff: float) -> None:
+        """检查是否需要发送定时推送通知"""
+        try:
+            if not self.position_notification_enabled or not self.position_notification_times:
+                return
+            
+            current_time = datetime.now()
+            current_time_str = current_time.strftime('%H:%M')
+            current_date = current_time.date()
+            
+            # 检查是否在推送时间点
+            for notification_time in self.position_notification_times:
+                try:
+                    # 解析配置的时间（格式：HH:MM）
+                    target_hour, target_minute = map(int, notification_time.split(':'))
+                    
+                    # 检查当前时间是否匹配（允许1分钟的误差）
+                    if (current_time.hour == target_hour and 
+                        abs(current_time.minute - target_minute) <= 1):
+                        
+                        # 检查今天是否已经推送过
+                        if self.last_notification_date != current_date:
+                            logger.info(f"⏰ 到达定时推送时间: {notification_time}")
+                            self._send_scheduled_position_notification(paxg_price, xauusd_price, diff)
+                            self.last_notification_date = current_date
+                            break  # 一次只推送一个时间点
+                            
+                except ValueError as e:
+                    logger.warning(f"⚠️ 解析推送时间失败: {notification_time} - {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"❌ 检查定时推送失败: {e}")
