@@ -91,7 +91,22 @@ class BinanceClient:
             return None
         except Exception as e:
             print(f"❌ 获取PAXG价格时发生未知错误: {e}")
-            return None
+            print("🔄 尝试重新初始化Binance客户端...")
+            
+            # 尝试重新初始化客户端
+            if self._initialize_client():
+                print("✅ 客户端重新初始化成功，再次尝试获取价格")
+                try:
+                    # 重新初始化成功后，再尝试一次获取价格
+                    ticker = self.client.futures_symbol_ticker(symbol=Config.PAXG_SYMBOL)
+                    price = float(ticker['price'])
+                    return price if price > 0 else None
+                except Exception as retry_e:
+                    print(f"❌ 重新初始化后仍无法获取价格: {retry_e}")
+                    return None
+            else:
+                print("❌ 客户端重新初始化失败")
+                return None
 
     @retry_on_error(max_retries=2, delay=0.5)
     def get_paxg_depth(self) -> Optional[Dict[str, Any]]:
@@ -108,39 +123,6 @@ class BinanceClient:
         except Exception as e:
             print(f"❌ 获取PAXG深度时发生未知错误: {e}")
             return None
-
-    def _get_futures_step_size(self, symbol: str) -> float:
-        """获取期货步进大小（带缓存）"""
-        current_time = time.time()
-        
-        # 检查缓存是否有效
-        if (symbol in self._step_size_cache and 
-            current_time - self._last_step_size_update < self._step_size_cache_ttl):
-            return self._step_size_cache[symbol]
-        
-        try:
-            info = self.client.futures_exchange_info()
-            for s in info.get('symbols', []):
-                if s.get('symbol') == symbol:
-                    for f in s.get('filters', []):
-                        if f.get('filterType') == 'LOT_SIZE':
-                            step = f.get('stepSize')
-                            step_size = float(step) if step is not None else 0.001
-                            
-                            # 更新缓存
-                            self._step_size_cache[symbol] = step_size
-                            self._last_step_size_update = current_time
-                            return step_size
-            
-            # 默认值
-            default_step = 0.001
-            self._step_size_cache[symbol] = default_step
-            self._last_step_size_update = current_time
-            return default_step
-            
-        except Exception as e:
-            print(f"⚠️ 获取步进大小失败，使用默认值: {e}")
-            return 0.001
 
     @retry_on_error(max_retries=2, delay=0.5)
     def set_leverage(self, symbol: Optional[str] = None, leverage: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -257,7 +239,6 @@ class BinanceClient:
             positions = self.client.futures_position_information(symbol=Config.PAXG_SYMBOL)
             # 只返回有持仓量的PAXG仓位
             active_positions = [p for p in positions if float(p.get('positionAmt', 0)) != 0]
-            
             if active_positions:
                 print(f"📊 发现 {len(active_positions)} 个活跃PAXG持仓")
             

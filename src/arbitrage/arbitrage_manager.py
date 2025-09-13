@@ -744,9 +744,7 @@ class ArbitrageManager:
                 # 更新价差统计（跟随循环执行）
                 self.update_diff_stats(diff, paxg_price, xauusd_price)
                 
-                # 检查定时推送
-                self._check_and_send_scheduled_notification(paxg_price, xauusd_price, diff)
-                
+                     
                 # 简化的价格显示
                 print(f"\r[{current_time}] PAXG: ${paxg_price:.2f} | XAUUSD: ${xauusd_price:.2f} | 价差: {diff:+.2f} | 范围: [{self.min_diff:.2f}, {self.max_diff:.2f}]", end="")
                 
@@ -767,7 +765,9 @@ class ArbitrageManager:
                 # 如果有持仓，分别显示持仓信息并检查平仓条件
                 if xau_positions or binance_positions:
                     self._display_positions_info(binance_positions, xau_positions, xau_exchange_name, diff)
-                    
+                     # 检查定时推送
+                    self._check_and_send_scheduled_notification(paxg_price, xauusd_price, diff)
+          
                     # 检查是否要平仓（使用已获取的持仓信息，避免重复调用API）
                     should_close = self.should_close_position(diff, binance_positions, xau_positions)
                     logger.info(f'是否应该平仓: {should_close} (基于已获取持仓判断)')
